@@ -974,6 +974,94 @@ img { display: block; max-width: 100%; }
   text-align: center;
 }
 
+/* Reward Adjustment Badges */
+.reward-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: var(--r-pill);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.reward-badge.bonus {
+  background: linear-gradient(135deg, #e8f5e9, #c8e6c9);
+  color: #1b5e20;
+  box-shadow: 0 1px 4px rgba(46, 125, 50, 0.15);
+}
+
+.reward-badge.penalty {
+  background: linear-gradient(135deg, #fce4ec, #f8bbd0);
+  color: #b71c1c;
+  box-shadow: 0 1px 4px rgba(183, 28, 28, 0.12);
+}
+
+.reward-badge.neutral {
+  background: #eceff1;
+  color: #78909c;
+}
+
+/* Inline reward tags for the info banner */
+.reward-tag {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: var(--r-pill);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+.reward-tag.bonus {
+  background: #c8e6c9;
+  color: #1b5e20;
+}
+.reward-tag.penalty {
+  background: #ffcdd2;
+  color: #b71c1c;
+}
+
+/* Redistribution Info Banner */
+.redistribution-info {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.85rem;
+  margin-top: 1rem;
+  padding: 1rem 1.25rem;
+  background: linear-gradient(135deg, #f1f8e9, #e8f5e9);
+  border: 1px solid #c8e6c9;
+  border-left: 4px solid #43a047;
+  border-radius: var(--r-md);
+  box-shadow: 0 2px 8px rgba(67, 160, 71, 0.08);
+}
+
+.redistribution-info-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: #c8e6c9;
+  color: #2e7d32;
+  margin-top: 0.1rem;
+}
+
+.redistribution-info-content strong {
+  display: block;
+  font-size: 0.88rem;
+  color: #1b5e20;
+  margin-bottom: 0.3rem;
+}
+
+.redistribution-info-content p {
+  margin: 0;
+  font-size: 0.8rem;
+  color: #33691e;
+  line-height: 1.55;
+}
+
 /* Live Proof Callout */
 .proof-callout-card {
   background: var(--surface);

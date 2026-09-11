@@ -10,6 +10,7 @@ const DATA_FILE = path.join(ROOT, 'data.json');
 const SCHEMA_FILE = path.join(ROOT, 'schema.sql');
 const DB_FILE = process.env.DATABASE_FILE || path.join(ROOT, 'vah-health.db');
 const sessions = new Map();
+let lastRedistributionDate = null;
 
 const database = new DatabaseSync(DB_FILE);
 database.exec('PRAGMA journal_mode = WAL');
@@ -139,13 +140,162 @@ function isTodayLog(log) {
   return log.dateKey === getTodayKey() || String(log.date || '').toLowerCase().startsWith('today');
 }
 
+// ---------------------------------------------------------------
+// Leaderboard Reward Redistribution Engine
+// ---------------------------------------------------------------
+
+function getTodayDateKey() {
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${now.getFullYear()}-${month}-${day}`;
+}
+
+function calculateRewardAdjustment(rank, totalUsers) {
+  if (totalUsers < 2) return 0;
+
+  const topCutoff = Math.max(1, Math.floor(totalUsers * 0.25));
+  const bottomStart = totalUsers - Math.max(1, Math.floor(totalUsers * 0.25)) + 1;
+
+  if (rank <= topCutoff) {
+    // Top 25%: earn ₹5–15 bonus, scaled by how high the rank is
+    const maxBonus = 15;
+    const minBonus = 5;
+    const positionRatio = topCutoff > 1 ? (topCutoff - rank) / (topCutoff - 1) : 1;
+    return Math.round(minBonus + positionRatio * (maxBonus - minBonus));
+  }
+
+  if (rank >= bottomStart) {
+    // Bottom 25%: mild deduction ₹5–15, scaled by how low the rank is
+    const maxPenalty = 15;
+    const minPenalty = 5;
+    const bottomCount = totalUsers - bottomStart + 1;
+    const positionInBottom = rank - bottomStart;
+    const positionRatio = bottomCount > 1 ? positionInBottom / (bottomCount - 1) : 0;
+    return -Math.round(minPenalty + positionRatio * (maxPenalty - minPenalty));
+  }
+
+  // Middle 50%: no adjustment
+  return 0;
+}
+
+function redistributeRewards() {
+  const todayKey = getTodayDateKey();
+
+  // Only run once per calendar day
+  if (lastRedistributionDate === todayKey) return;
+
+  // Check if already recorded in database for today
+  const existing = database.prepare(
+    'SELECT COUNT(*) AS count FROM reward_history WHERE adjustment_date = ?'
+  ).get(todayKey);
+  if (existing.count > 0) {
+    lastRedistributionDate = todayKey;
+    return;
+  }
+
+  // Load all users and rank them
+  const allUsers = database.prepare('SELECT email, name, state_json FROM users').all();
+  const ranked = allUsers.map(user => {
+    const state = user.state_json ? JSON.parse(user.state_json) : {};
+    const logs = Array.isArray(state.logs) ? state.logs : [];
+    const depositAmount = Number(state.depositAmount) || 0;
+    const escrowLocked = Number(state.escrowLocked) || 0;
+    const todayLog = logs.find(isTodayLog) || null;
+    const verifiedDays = logs.filter(log => log.proofStatus === 'verified').length;
+    const goalPercent = logs.length
+      ? Math.round(logs.reduce((total, log) => total + (Number(log.goalPercent) || 0), 0) / logs.length)
+      : 0;
+    const averageSteps = logs.length
+      ? Math.round(logs.reduce((total, log) => total + (Number(log.steps) || 0), 0) / logs.length)
+      : 0;
+    const todaySteps = todayLog ? Number(todayLog.steps) || 0 : 0;
+    const todayGoalPercent = todayLog ? Number(todayLog.goalPercent) || 0 : 0;
+    const lastUpdated = logs.reduce((latest, log) => {
+      const timestamp = Date.parse(log.proofTimestamp || log.date || '') || 0;
+      return Math.max(latest, timestamp);
+    }, 0);
+
+    return { email: user.email, state, depositAmount, escrowLocked, todaySteps, todayGoalPercent, verifiedDays, goalPercent, averageSteps, lastUpdated };
+  }).sort((a, b) => {
+    if (b.todaySteps !== a.todaySteps) return b.todaySteps - a.todaySteps;
+    if (b.todayGoalPercent !== a.todayGoalPercent) return b.todayGoalPercent - a.todayGoalPercent;
+    if (b.verifiedDays !== a.verifiedDays) return b.verifiedDays - a.verifiedDays;
+    if (b.goalPercent !== a.goalPercent) return b.goalPercent - a.goalPercent;
+    if (b.averageSteps !== a.averageSteps) return b.averageSteps - a.averageSteps;
+    return b.lastUpdated - a.lastUpdated;
+  });
+
+  // Filter to only users with deposits for redistribution
+  const eligibleUsers = ranked.filter(u => u.depositAmount > 0);
+  if (eligibleUsers.length < 2) {
+    lastRedistributionDate = todayKey;
+    return;
+  }
+
+  const totalEligible = eligibleUsers.length;
+  const insertHistory = database.prepare(
+    'INSERT INTO reward_history (user_email, adjustment_date, amount, rank, total_users) VALUES (?, ?, ?, ?, ?)'
+  );
+
+  eligibleUsers.forEach((user, index) => {
+    const rank = index + 1;
+    let adjustment = calculateRewardAdjustment(rank, totalEligible);
+
+    // For deductions: don't push escrow below 0
+    if (adjustment < 0) {
+      adjustment = Math.max(adjustment, -user.escrowLocked);
+    }
+
+    if (adjustment === 0) {
+      insertHistory.run(user.email, todayKey, 0, rank, totalEligible);
+      return;
+    }
+
+    // Apply the adjustment to the user's state
+    const updatedState = { ...user.state };
+    if (adjustment > 0) {
+      // Bonus: increase unlocked refund
+      updatedState.unlockedRefund = (Number(updatedState.unlockedRefund) || 0) + adjustment;
+    } else {
+      // Deduction: decrease from escrow locked, add to a penalty tracker
+      updatedState.escrowLocked = Math.max(0, (Number(updatedState.escrowLocked) || 0) + adjustment);
+    }
+    updatedState.lastRewardAdjustment = adjustment;
+    updatedState.lastRewardDate = todayKey;
+
+    // Save updated state
+    database.prepare(
+      'UPDATE users SET state_json = ? WHERE email = ?'
+    ).run(JSON.stringify(updatedState), user.email);
+
+    // Record in history
+    insertHistory.run(user.email, todayKey, adjustment, rank, totalEligible);
+  });
+
+  lastRedistributionDate = todayKey;
+  console.log(`Reward redistribution completed for ${todayKey} (${totalEligible} eligible users).`);
+}
+
+function getTodayRewardForUser(email) {
+  const todayKey = getTodayDateKey();
+  const row = database.prepare(
+    'SELECT amount FROM reward_history WHERE user_email = ? AND adjustment_date = ? LIMIT 1'
+  ).get(email, todayKey);
+  return row ? row.amount : 0;
+}
+
 function leaderboardResponse(currentUserEmail) {
+  // Trigger daily redistribution if it hasn't run yet today
+  redistributeRewards();
+
   const users = database.prepare('SELECT email, name, state_json FROM users').all();
   return users.map(user => {
     const state = user.state_json ? JSON.parse(user.state_json) : {};
     const logs = Array.isArray(state.logs) ? state.logs : [];
-      const todayLog = logs.find(isTodayLog) || null;
+    const todayLog = logs.find(isTodayLog) || null;
     const verifiedDays = logs.filter(log => log.proofStatus === 'verified').length;
+    const depositAmount = Number(state.depositAmount) || 0;
     const goalPercent = logs.length
       ? Math.round(logs.reduce((total, log) => total + (Number(log.goalPercent) || 0), 0) / logs.length)
       : 0;
@@ -159,15 +309,17 @@ function leaderboardResponse(currentUserEmail) {
       verifiedDays,
       goalPercent,
       averageSteps,
-            today: todayLog ? {
-              steps: Number(todayLog.steps) || 0,
-              workout: String(todayLog.workoutType || 'Workout recorded'),
-              minutes: Number(todayLog.workoutMins) || 0,
-              calories: Number(todayLog.calBurned) || 0,
-              goalPercent: Number(todayLog.goalPercent) || 0,
-              status: todayLog.proofStatus === 'verified' ? 'Verified' : 'Recorded'
-            } : null,
-            todaySteps: todayLog ? Number(todayLog.steps) || 0 : 0,
+      today: todayLog ? {
+        steps: Number(todayLog.steps) || 0,
+        workout: String(todayLog.workoutType || 'Workout recorded'),
+        minutes: Number(todayLog.workoutMins) || 0,
+        calories: Number(todayLog.calBurned) || 0,
+        goalPercent: Number(todayLog.goalPercent) || 0,
+        status: todayLog.proofStatus === 'verified' ? 'Verified' : 'Recorded'
+      } : null,
+      todaySteps: todayLog ? Number(todayLog.steps) || 0 : 0,
+      rewardAdjustment: getTodayRewardForUser(user.email),
+      hasDeposit: depositAmount > 0,
       lastUpdated: logs.reduce((latest, log) => {
         const timestamp = Date.parse(log.proofTimestamp || log.date || '') || 0;
         return Math.max(latest, timestamp);
@@ -232,7 +384,13 @@ function handleApi(request, response, pathname) {
   if (request.method === 'GET' && pathname === '/api/leaderboard') {
     const user = authenticatedUser(request);
     if (!user) return sendJson(response, 401, { error: 'Authentication required.' });
-    return sendJson(response, 200, { leaderboard: leaderboardResponse(user.email) });
+    const lb = leaderboardResponse(user.email);
+    // After redistribution may have updated the current user's state, re-fetch it
+    const freshUser = getUser(user.email);
+    return sendJson(response, 200, {
+      leaderboard: lb,
+      updatedState: freshUser ? freshUser.state : null
+    });
   }
 
   if (request.method === 'PUT' && pathname === '/api/state') {

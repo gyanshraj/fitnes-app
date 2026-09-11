@@ -18,3 +18,16 @@ CREATE TABLE IF NOT EXISTS workout_logs (
 
 CREATE INDEX IF NOT EXISTS idx_workout_logs_user_date
   ON workout_logs (user_email, workout_date);
+
+CREATE TABLE IF NOT EXISTS reward_history (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_email TEXT NOT NULL,
+  adjustment_date TEXT NOT NULL,
+  amount INTEGER NOT NULL,
+  rank INTEGER NOT NULL,
+  total_users INTEGER NOT NULL,
+  FOREIGN KEY (user_email) REFERENCES users(email) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_reward_history_date
+  ON reward_history (adjustment_date);

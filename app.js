@@ -573,11 +573,37 @@ async function renderLeaderboard({ quiet = false } = {}) {
   if (!tableBody || !AUTH_STATE.isLoggedIn || !AUTH_STATE.token) return;
 
   if (!quiet) {
-    tableBody.innerHTML = '<tr><td colspan="7" class="leaderboard-loading">Loading today\'s student performances...</td></tr>';
+    tableBody.innerHTML = '<tr><td colspan="8" class="leaderboard-loading">Loading today\'s student performances...</td></tr>';
   }
   try {
     const response = await apiRequest('/leaderboard', apiOptions('GET'));
     const nextLeaderboard = response.leaderboard || [];
+
+    // Sync local state if server updated it (e.g., from reward redistribution)
+    if (response.updatedState) {
+      const serverState = response.updatedState;
+      const previousAdjustment = STATE.lastRewardAdjustment;
+      const previousRewardDate = STATE.lastRewardDate;
+
+      if (serverState.escrowLocked !== undefined) STATE.escrowLocked = serverState.escrowLocked;
+      if (serverState.unlockedRefund !== undefined) STATE.unlockedRefund = serverState.unlockedRefund;
+      if (serverState.lastRewardAdjustment !== undefined) STATE.lastRewardAdjustment = serverState.lastRewardAdjustment;
+      if (serverState.lastRewardDate !== undefined) STATE.lastRewardDate = serverState.lastRewardDate;
+
+      // Show toast for new reward adjustments
+      if (STATE.lastRewardDate && STATE.lastRewardDate !== previousRewardDate) {
+        const adj = STATE.lastRewardAdjustment;
+        if (adj > 0) {
+          showToast(`🏆 You earned +₹${adj} bonus for your leaderboard performance today! Keep climbing!`, 'gold');
+        } else if (adj < 0) {
+          showToast(`⚠️ ₹${Math.abs(adj)} deducted from escrow — climb the leaderboard to earn it back!`, 'warning');
+        }
+      }
+
+      renderEscrowHeader();
+      renderHeroVault();
+    }
+
     const promotedEntry = nextLeaderboard.find(entry => {
       const previousRank = previousLeaderboardRanks.get(entry.name);
       return entry.rank === 1 && previousRank && previousRank > 1;
@@ -598,29 +624,41 @@ async function renderLeaderboard({ quiet = false } = {}) {
         : '<div class="podium-empty">Be the first student to log a workout.</div>';
     }
     tableBody.innerHTML = leaderboard.length
-      ? leaderboard.map(entry => `
+      ? leaderboard.map(entry => {
+          const adj = entry.rewardAdjustment || 0;
+          const rewardBadge = adj > 0
+            ? `<span class="reward-badge bonus">+₹${adj}</span>`
+            : adj < 0
+            ? `<span class="reward-badge penalty">-₹${Math.abs(adj)}</span>`
+            : entry.hasDeposit
+            ? `<span class="reward-badge neutral">₹0</span>`
+            : `<span class="reward-badge neutral">—</span>`;
+          return `
         <tr class="${entry.isCurrentUser ? 'leaderboard-current-user' : ''}${promotedEntry && promotedEntry.name === entry.name ? ' leaderboard-promoted' : ''}">
           <td><span class="leaderboard-rank rank-${entry.rank}">${entry.rank}</span></td>
           <td><strong>${escapeHtml(entry.name.replace(' (Student)', ''))}</strong>${entry.isCurrentUser ? '<span class="leaderboard-you">You</span>' : ''}</td>
           <td>${entry.today ? escapeHtml(entry.today.workout) : '<span class="leaderboard-muted">No workout yet</span>'}${entry.today && entry.today.minutes ? ` <small>${entry.today.minutes} min</small>` : ''}</td>
           <td>${entry.today ? entry.today.steps.toLocaleString() : '--'}</td>
           <td>${entry.today ? `${entry.today.calories.toLocaleString()} kcal` : '--'}</td>
+          <td>${rewardBadge}</td>
           <td><span class="leaderboard-status ${entry.today ? 'has-today' : ''}">${entry.today ? entry.today.status : 'Not recorded'}</span></td>
-        </tr>
-      `).join('')
-      : '<tr><td colspan="7" class="leaderboard-loading">Be the first student to log a workout.</td></tr>';
+        </tr>`;
+        }).join('')
+      : '<tr><td colspan="8" class="leaderboard-loading">Be the first student to log a workout.</td></tr>';
 
     const currentUser = leaderboard.find(entry => entry.isCurrentUser);
     if (status && currentUser) {
+      const adj = currentUser.rewardAdjustment || 0;
+      const rewardHint = adj > 0 ? ` Today's bonus: +₹${adj}!` : adj < 0 ? ` Today's deduction: ₹${Math.abs(adj)}.` : '';
       status.textContent = promotedEntry
-        ? `${escapeHtml(promotedEntry.name.replace(' (Student)', ''))} moved into #1. Keep pushing!`
+        ? `${escapeHtml(promotedEntry.name.replace(' (Student)', ''))} moved into #1. Keep pushing!${rewardHint}`
         : currentUser.rank === 1
-        ? 'You are leading the board. Keep the streak alive!'
-        : `You are #${currentUser.rank}. One more healthy day can move you up.`;
+        ? `You are leading the board. Keep the streak alive!${rewardHint}`
+        : `You are #${currentUser.rank}. One more healthy day can move you up.${rewardHint}`;
     }
   } catch (error) {
     leaderboard = [];
-    tableBody.innerHTML = '<tr><td colspan="7" class="leaderboard-loading">Leaderboard is unavailable right now. Your personal progress is still saved.</td></tr>';
+    tableBody.innerHTML = '<tr><td colspan="8" class="leaderboard-loading">Leaderboard is unavailable right now. Your personal progress is still saved.</td></tr>';
     if (status) status.textContent = 'Every day you show up is progress. Keep building your streak.';
   }
 }
